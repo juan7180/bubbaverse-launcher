@@ -8,7 +8,7 @@ VSVersionInfo(
     fileType=0x1,
     subtype=0x0,
     date=(0, 0)
-    ),
+  ),
   kids=[
     StringFileInfo(
       [
@@ -18,7 +18,7 @@ VSVersionInfo(
         StringStruct(u'FileDescription', u'Bubbaverse Player Launcher'),
         StringStruct(u'FileVersion', u'1.0.0.0'),
         StringStruct(u'InternalName', u'BubbaversePlayerLauncher'),
-        StringStruct(u'LegalCopyright', u'Copyright (C) 2003'),
+        StringStruct(u'LegalCopyright', u'Copyright (C) 1999'),
         StringStruct(u'OriginalFilename', u'BubbaversePlayerLauncher.exe'),
         StringStruct(u'ProductName', u'Bubbaverse Launcher'),
         StringStruct(u'ProductVersion', u'1.0.0.0')])

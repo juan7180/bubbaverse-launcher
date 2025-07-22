@@ -1,3 +1,4 @@
-requests
-colorama
+tqdm
 pyinstaller
+colorama
+pywin32
