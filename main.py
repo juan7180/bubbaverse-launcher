@@ -291,12 +291,14 @@ class Bootstrapper:
             if platform.system() == "Windows":
                 creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
                 process = subprocess.Popen(args, creationflags=creation_flags)
-                process.wait()
+                time.sleep(2)
+                return True
             else:
                 wine_path = Path(self.installation_dir / "winepath.txt").read_text().strip() if (
                     self.installation_dir / "winepath.txt").exists() else "wine"
                 subprocess.run([wine_path] + args)
-            return True
+                time.sleep(2)
+                return True
         except Exception as e:
             Logger.error(f"Game launch failed: {e}")
             return False
