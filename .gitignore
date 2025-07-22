@@ -210,3 +210,5 @@ __marimo__/
 /build/
 /dist/
 /*.spec
+version
+*.zip

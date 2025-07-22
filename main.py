@@ -8,6 +8,7 @@ import shutil
 import zipfile
 import platform
 import subprocess
+import psutil
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple
@@ -22,6 +23,7 @@ SETUP_URL = "setup.boblox.org"
 FALLBACK_SETUP_URL = "https://setup.boblox.org"
 BOOTSTRAPPER_FILENAME = "BubbaversePlayerLauncher.exe" if platform.system() == "Windows" else "BubbaversePlayerLinuxLauncher"
 BUILD_DATE = datetime.now().strftime("%Y-%m-%d")
+MAX_FILE_SIZE = 500 * 1024 * 1024
 
 def center_text(text, color=Fore.BLUE):
     try:
@@ -29,6 +31,11 @@ def center_text(text, color=Fore.BLUE):
     except:
         columns = 80
     return "\n".join(color + line.center(columns) + Style.RESET_ALL for line in text.split("\n"))
+
+def check_memory_safety(required_bytes):
+    available = psutil.virtual_memory().available
+    if required_bytes > available * 0.8:
+        raise MemoryError(f"Insufficient memory (needed: {required_bytes}, available: {available})")
 
 class Logger:
     @staticmethod
@@ -58,12 +65,9 @@ class HttpClient:
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Bubbaverse Launcher'})
             with urllib.request.urlopen(req, timeout=timeout) as response:
-                return response.read().decode('utf-8')
-        except urllib.error.URLError as e:
-            Logger.debug(f"Failed to fetch {url}: {e}")
-            return None
+                return response.read().decode('utf-8').strip()
         except Exception as e:
-            Logger.debug(f"Unexpected error fetching {url}: {e}")
+            Logger.debug(f"Error fetching {url}: {e}")
             return None
 
     @staticmethod
@@ -71,30 +75,19 @@ class HttpClient:
         Logger.debug(f"GET {url}")
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Bubbaverse Launcher'})
-            response = urllib.request.urlopen(req)
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 1024
-            
-            with tqdm(
-                total=total_size,
-                unit='iB',
-                unit_scale=True,
-                desc=f"Downloading {path.name}",
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
-            ) as progress_bar:
-                with open(path, 'wb') as f:
-                    while True:
-                        buffer = response.read(block_size)
-                        if not buffer:
-                            break
-                        f.write(buffer)
-                        progress_bar.update(len(buffer))
+            with urllib.request.urlopen(req) as response:
+                total_size = min(int(response.headers.get('content-length', 0)), MAX_FILE_SIZE)
+                check_memory_safety(total_size)
+                with tqdm(total=total_size, unit='iB', unit_scale=True, desc=f"Downloading {path.name}") as progress_bar:
+                    with open(path, 'wb') as f:
+                        for chunk in iter(lambda: response.read(65536), b''):
+                            f.write(chunk)
+                            progress_bar.update(len(chunk))
+                            if progress_bar.n > MAX_FILE_SIZE:
+                                raise MemoryError("File too large")
             return True
-        except urllib.error.URLError as e:
-            Logger.error(f"Failed to download {url}: {e}")
-            return False
         except Exception as e:
-            Logger.error(f"Unexpected error during download: {e}")
+            Logger.error(f"Download failed: {e}")
             return False
 
 class FileUtils:
@@ -106,28 +99,25 @@ class FileUtils:
     def get_sha1_hash_of_file(path: Path) -> str:
         sha1 = hashlib.sha1()
         with open(path, 'rb') as f:
-            while True:
-                data = f.read(65536)
-                if not data:
-                    break
-                sha1.update(data)
+            for chunk in iter(lambda: f.read(65536), b''):
+                sha1.update(chunk)
         return sha1.hexdigest()
 
     @staticmethod
     def create_folder_if_not_exists(path: Path) -> None:
         if not path.exists():
-            Logger.info(f"Creating folder {path}")
             path.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def extract_zip(zip_file: Path, target_dir: Path) -> bool:
-        Logger.info(f"Extracting {zip_file} to {target_dir}")
         try:
             with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                total_size = sum(file.file_size for file in zip_ref.infolist())
+                check_memory_safety(total_size)
                 zip_ref.extractall(target_dir)
             return True
-        except zipfile.BadZipFile as e:
-            Logger.error(f"Failed to extract {zip_file}: {e}")
+        except Exception as e:
+            Logger.error(f"Extraction failed: {e}")
             return False
 
 class SystemUtils:
@@ -135,75 +125,51 @@ class SystemUtils:
     def get_installation_directory() -> Path:
         if platform.system() == "Windows":
             return Path(os.getenv('LOCALAPPDATA')) / "Bubbaverse"
-        else:
-            return Path.home() / ".local" / "Bubbaverse"
+        return Path.home() / ".local" / "Bubbaverse"
 
     @staticmethod
     def clear_terminal() -> None:
-        if platform.system() == "Windows":
-            os.system('cls')
-        else:
-            os.system('clear')
+        os.system('cls' if platform.system() == "Windows" else 'clear')
 
     @staticmethod
     def register_url_scheme(bootstrapper_path: Path) -> None:
         if platform.system() == "Windows":
             try:
                 import winreg
-                hkey = winreg.HKEY_CURRENT_USER
-                with winreg.CreateKey(hkey, r"Software\Classes\bubba-player") as key:
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\bubba-player") as key:
                     winreg.SetValue(key, '', winreg.REG_SZ, 'URL:BubbaVerse Protocol')
                     winreg.SetValueEx(key, 'URL Protocol', 0, winreg.REG_SZ, '')
                     with winreg.CreateKey(key, 'shell\\open\\command') as cmd_key:
                         winreg.SetValue(cmd_key, '', winreg.REG_SZ, f'"{bootstrapper_path}" "%1"')
-                    with winreg.CreateKey(key, 'DefaultIcon') as icon_key:
-                        winreg.SetValue(icon_key, '', winreg.REG_SZ, f'"{bootstrapper_path}",0')
             except Exception as e:
-                Logger.error(f"Failed to register URL scheme: {e}")
-        else:
-            desktop_file = f"""[Desktop Entry]
-Name=Bubbaverse Launcher
-Exec={bootstrapper_path} %u
-Icon={bootstrapper_path}
-Type=Application
-Terminal=true
-Version={BUILD_DATE}
-MimeType=x-scheme-handler/bubba-player;"""
-            desktop_path = Path.home() / '.local' / 'share' / 'applications' / 'bubba-player.desktop'
-            try:
-                with open(desktop_path, 'w') as f:
-                    f.write(desktop_file)
-                os.chmod(desktop_path, 0o755)
-            except Exception as e:
-                Logger.error(f"Failed to create desktop file: {e}")
+                Logger.error(f"Registry error: {e}")
 
 def get_version_info():
     try:
         if getattr(sys, 'frozen', False):
-            try:
-                import win32api
-                info = win32api.GetFileVersionInfo(sys.executable, '\\')
-                version = "%d.%d.%d.%d" % (
-                    info['FileVersionMS'] / 65536,
-                    info['FileVersionMS'] % 65536,
-                    info['FileVersionLS'] / 65536,
-                    info['FileVersionLS'] % 65536
-                )
-                return version
-            except:
-                pass
+            import win32api
+            info = win32api.GetFileVersionInfo(sys.executable, '\\')
+            return "%d.%d.%d.%d" % (
+                info['FileVersionMS'] / 65536,
+                info['FileVersionMS'] % 65536,
+                info['FileVersionLS'] / 65536,
+                info['FileVersionLS'] % 65536
+            )
     except:
         pass
+    version_path = Path(__file__).parent / 'version'
+    if version_path.exists():
+        with open(version_path, 'r') as f:
+            version = f.read().strip()
+            if version.startswith('version-'):
+                return version[8:]
+            return version
     return BUILD_DATE
 
 class Bootstrapper:
     def __init__(self):
         self.args = sys.argv
-        self.http_client = HttpClient
-        self.file_utils = FileUtils
-        self.system_utils = SystemUtils
-        self.logger = Logger
-        self.installation_dir = self.system_utils.get_installation_directory()
+        self.installation_dir = SystemUtils.get_installation_directory()
         self.versions_dir = self.installation_dir / "Versions"
         self.temp_dir = self.installation_dir / "Downloads"
         self.setup_url = SETUP_URL
@@ -211,9 +177,9 @@ class Bootstrapper:
         self.current_version_dir = None
 
     def display_startup_text(self) -> None:
-        self.system_utils.clear_terminal()
+        SystemUtils.clear_terminal()
         version = get_version_info()
-        startup_text = f"""
+        banner = f"""
         888888b.            888      888               
         888  "88b           888      888               
         888  .88P           888      888               
@@ -224,39 +190,35 @@ class Bootstrapper:
         8888888P"   "Y88888 88888P"  88888P"  "Y888888
 
        {BASE_URL} | Build Date: {BUILD_DATE} | Version: {version}"""
-        print(center_text(startup_text))
+        print(center_text(banner))
 
     def get_latest_version(self) -> bool:
-        version_urls = [
-            f"https://{self.setup_url}/version",
-            f"{FALLBACK_SETUP_URL}/version",
-            f"http://{self.setup_url}/version"
-        ]
-        
-        for url in version_urls:
-            self.latest_version = self.http_client.get(url)
-            if self.latest_version:
+        for url in [f"https://{self.setup_url}/version", 
+                   f"{FALLBACK_SETUP_URL}/version",
+                   f"http://{self.setup_url}/version"]:
+            version = HttpClient.get(url)
+            if version:
+                self.latest_version = version.strip()
+                clean_version = ''.join(c for c in self.latest_version if c.isalnum())
                 self.setup_url = url.split('/')[2]
-                self.logger.info(f"Latest Client Version: {self.latest_version}")
-                self.current_version_dir = self.versions_dir / self.latest_version
+                Logger.info(f"Latest Version: {self.latest_version}")
+                self.current_version_dir = self.versions_dir / clean_version
                 return True
             time.sleep(1)
-        
-        self.logger.error("Failed to fetch version from all servers")
+        Logger.error("Version check failed")
         return False
 
     def setup_directories(self) -> None:
-        self.file_utils.create_folder_if_not_exists(self.installation_dir)
-        self.file_utils.create_folder_if_not_exists(self.versions_dir)
-        self.file_utils.create_folder_if_not_exists(self.temp_dir)
-        self.file_utils.create_folder_if_not_exists(self.current_version_dir)
+        FileUtils.create_folder_if_not_exists(self.installation_dir)
+        FileUtils.create_folder_if_not_exists(self.versions_dir)
+        FileUtils.create_folder_if_not_exists(self.temp_dir)
+        FileUtils.create_folder_if_not_exists(self.current_version_dir)
 
     def download_bootstrapper(self) -> bool:
         bootstrapper_path = self.current_version_dir / BOOTSTRAPPER_FILENAME
-        download_url = f"https://{self.setup_url}/{self.latest_version}-{BOOTSTRAPPER_FILENAME}"
         if not bootstrapper_path.exists():
-            self.logger.info("Downloading latest bootstrapper")
-            if not self.http_client.download_file(download_url, bootstrapper_path):
+            url = f"https://{self.setup_url}/{self.latest_version}-{BOOTSTRAPPER_FILENAME}"
+            if not HttpClient.download_file(url, bootstrapper_path):
                 return False
         if platform.system() != "Windows":
             os.chmod(bootstrapper_path, 0o755)
@@ -264,135 +226,130 @@ class Bootstrapper:
 
     def run_latest_bootstrapper(self) -> None:
         bootstrapper_path = self.current_version_dir / BOOTSTRAPPER_FILENAME
-        current_hash = self.file_utils.get_sha1_hash_of_file(Path(sys.argv[0]))
-        latest_hash = self.file_utils.get_sha1_hash_of_file(bootstrapper_path)
-        if current_hash != latest_hash:
-            self.logger.info("Starting latest bootstrapper")
+        if FileUtils.get_sha1_hash_of_file(Path(sys.argv[0])) != FileUtils.get_sha1_hash_of_file(bootstrapper_path):
             try:
-                args = [str(bootstrapper_path)] + self.args[1:]
-                subprocess.Popen(args)
+                subprocess.Popen([str(bootstrapper_path)] + self.args[1:])
                 sys.exit(0)
             except Exception as e:
-                self.logger.error(f"Failed to start bootstrapper: {e}")
+                Logger.error(f"Launch failed: {e}")
                 sys.exit(1)
 
     def download_client_files(self) -> bool:
-        self.logger.info("Downloading client files")
         bootstrapper_path = self.current_version_dir / BOOTSTRAPPER_FILENAME
         for item in self.current_version_dir.iterdir():
             if item != bootstrapper_path:
-                if item.is_dir():
-                    shutil.rmtree(item)
-                else:
-                    item.unlink()
-        version_url_prefix = f"https://{self.setup_url}/{self.latest_version}-"
-        client_zip_url = f"{version_url_prefix}2021client.zip"
-        client_zip_path = self.temp_dir / self.file_utils.generate_md5(client_zip_url)
-        if not self.http_client.download_file(client_zip_url, client_zip_path):
+                shutil.rmtree(item) if item.is_dir() else item.unlink()
+        
+        zip_url = f"https://{self.setup_url}/{self.latest_version}-2021client.zip"
+        zip_path = self.temp_dir / FileUtils.generate_md5(zip_url)
+        
+        if not HttpClient.download_file(zip_url, zip_path):
             return False
-        client_dir = self.current_version_dir / "Client2021"
-        self.file_utils.create_folder_if_not_exists(client_dir)
-        if not self.file_utils.extract_zip(client_zip_path, client_dir):
+            
+        if not FileUtils.extract_zip(zip_path, self.current_version_dir / "Client2021"):
             return False
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-        self.system_utils.register_url_scheme(bootstrapper_path)
-        app_settings = f"""<?xml version="1.0" encoding="UTF-8"?>
+            
+        SystemUtils.register_url_scheme(bootstrapper_path)
+        with open(self.current_version_dir / "AppSettings.xml", 'w') as f:
+            f.write(f"""<?xml version="1.0" encoding="UTF-8"?>
 <Settings>
     <ContentFolder>content</ContentFolder>
     <BaseUrl>http://{BASE_URL}</BaseUrl>
-</Settings>"""
-        with open(self.current_version_dir / "AppSettings.xml", 'w') as f:
-            f.write(app_settings)
-        for item in self.versions_dir.iterdir():
-            if item.is_dir() and item != self.current_version_dir:
-                shutil.rmtree(item, ignore_errors=True)
+</Settings>""")
         return True
 
     def parse_launch_args(self) -> Tuple[str, str, str, str]:
         if len(self.args) == 1:
             return ("", "", "", "")
-        main_arg = self.args[1].replace("bubba-player://", "")
-        parts = main_arg.split("+")
-        launch_mode = ""
-        auth_ticket = ""
-        join_script = ""
-        client_year = ""
+        parts = self.args[1].replace("bubba-player://", "").split("+")
+        result = ["", "", "", ""]
         for part in parts:
             if ":" in part:
                 key, value = part.split(":", 1)
-                if key == "launchmode":
-                    launch_mode = value
-                elif key == "gameinfo":
-                    auth_ticket = value
-                elif key == "placelauncherurl":
-                    join_script = value
-                elif key == "clientyear":
-                    client_year = value
-        return (launch_mode, auth_ticket, join_script, client_year)
+                if key == "launchmode": result[0] = value
+                elif key == "gameinfo": result[1] = value
+                elif key == "placelauncherurl": result[2] = value
+                elif key == "clientyear": result[3] = value
+        return tuple(result)
 
     def launch_game(self, launch_mode: str, auth_ticket: str, join_script: str) -> bool:
         if launch_mode != "play":
-            self.logger.error("Unknown launch mode")
+            Logger.error("Invalid launch mode")
             return False
+            
         client_path = self.current_version_dir / "Client2021" / "BubbaversePlayerBeta.exe"
         if not client_path.exists():
-            self.logger.error("Client executable not found")
+            Logger.error(f"Client not found at {client_path}")
             return False
-        self.logger.info("Launching Bubbaverse Player")
-        args = [
-            str(client_path),
-            "--play",
-            "--authenticationUrl", f"https://{BASE_URL}/Login/Negotiate.ashx",
-            "--authenticationTicket", auth_ticket,
-            "--joinScriptUrl", join_script
-        ]
-        if platform.system() == "Windows":
-            subprocess.Popen(args)
-        else:
-            wine_path = self._get_wine_path()
-            args = [wine_path] + args
-            subprocess.run(args)
-        return True
-
-    def _get_wine_path(self) -> str:
-        wine_path_file = self.installation_dir / "winepath.txt"
-        if wine_path_file.exists():
-            with open(wine_path_file, 'r') as f:
-                custom_wine = f.read().strip()
-                self.logger.info(f"Using custom wine binary: {custom_wine}")
-                return custom_wine
-        return "wine"
+            
+        args = [str(client_path), "--play",
+               "--authenticationUrl", f"https://{BASE_URL}/Login/Negotiate.ashx",
+               "--authenticationTicket", auth_ticket,
+               "--joinScriptUrl", join_script]
+               
+        try:
+            if platform.system() == "Windows":
+                creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+                process = subprocess.Popen(args, creationflags=creation_flags)
+                process.wait()
+            else:
+                wine_path = Path(self.installation_dir / "winepath.txt").read_text().strip() if (
+                    self.installation_dir / "winepath.txt").exists() else "wine"
+                subprocess.run([wine_path] + args)
+            return True
+        except Exception as e:
+            Logger.error(f"Game launch failed: {e}")
+            return False
 
     def run(self) -> None:
         self.display_startup_text()
+        
         if not self.get_latest_version():
             time.sleep(10)
             sys.exit(1)
+            
         self.setup_directories()
+        
         if not self.download_bootstrapper():
             time.sleep(10)
             sys.exit(1)
+            
         self.run_latest_bootstrapper()
-        app_settings_path = self.current_version_dir / "AppSettings.xml"
-        if not app_settings_path.exists():
+        
+        if not (self.current_version_dir / "AppSettings.xml").exists():
+            Logger.info("Downloading client files...")
             if not self.download_client_files():
+                Logger.error("Failed to download client files")
                 time.sleep(10)
                 sys.exit(1)
-        launch_mode, auth_ticket, join_script, _ = self.parse_launch_args()
-        if not launch_mode:
+        
+        if len(self.args) > 1:
+            mode, ticket, script, _ = self.parse_launch_args()
+            if mode == "play":
+                Logger.info("Launching game...")
+                if not self.launch_game(mode, ticket, script):
+                    time.sleep(10)
+                    sys.exit(1)
+        else:
+            Logger.info("Opening website...")
             if platform.system() == "Windows":
                 subprocess.Popen(["cmd", "/c", "start", f"https://{BASE_URL}/games"])
             else:
                 subprocess.Popen(["xdg-open", f"https://{BASE_URL}/games"])
             sys.exit(0)
-        if not self.launch_game(launch_mode, auth_ticket, join_script):
-            time.sleep(10)
-            sys.exit(1)
 
 if __name__ == "__main__":
     try:
-        bootstrapper = Bootstrapper()
-        bootstrapper.run()
+        if psutil.virtual_memory().available < 100 * 1024 * 1024:
+            Logger.error("Low system memory")
+            time.sleep(10)
+            sys.exit(1)
+        Bootstrapper().run()
+    except MemoryError as e:
+        Logger.error(f"Memory error: {e}")
+        time.sleep(10)
+        sys.exit(1)
     except Exception as e:
         Logger.error(f"Fatal error: {e}")
         time.sleep(10)
+        sys.exit(1)
