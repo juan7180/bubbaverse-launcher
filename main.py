@@ -136,13 +136,47 @@ class SystemUtils:
         if platform.system() == "Windows":
             try:
                 import winreg
-                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\bubba-player") as key:
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\\Classes\\bubba-player") as key:
                     winreg.SetValue(key, '', winreg.REG_SZ, 'URL:BubbaVerse Protocol')
                     winreg.SetValueEx(key, 'URL Protocol', 0, winreg.REG_SZ, '')
                     with winreg.CreateKey(key, 'shell\\open\\command') as cmd_key:
                         winreg.SetValue(cmd_key, '', winreg.REG_SZ, f'"{bootstrapper_path}" "%1"')
             except Exception as e:
                 Logger.error(f"Registry error: {e}")
+        elif platform.system() == "Linux":
+            try:
+                import subprocess
+                from pathlib import Path
+                desktop_dir = Path.home() / ".local/share/applications"
+                desktop_dir.mkdir(parents=True, exist_ok=True)
+                desktop_file = desktop_dir / "bubba-player.desktop"
+                exec_path = str(bootstrapper_path.resolve())
+                # Check if already registered
+                mime_query = subprocess.run([
+                    "xdg-mime", "query", "default", "x-scheme-handler/bubba-player"
+                ], capture_output=True, text=True)
+                if mime_query.returncode == 0 and "bubba-player.desktop" in mime_query.stdout:
+                    Logger.info("bubba-player scheme already registered.")
+                    return
+                # Write .desktop file
+                desktop_content = f"""[Desktop Entry]
+Name=BubbaVerse Player Launcher
+Exec={exec_path} %u
+Type=Application
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/bubba-player;
+"""
+                with open(desktop_file, "w") as f:
+                    f.write(desktop_content)
+                # Register the handler
+                subprocess.run(["update-desktop-database", str(desktop_dir)], check=False)
+                subprocess.run([
+                    "xdg-mime", "default", "bubba-player.desktop", "x-scheme-handler/bubba-player"
+                ], check=False)
+                Logger.info("Registered bubba-player URL scheme for this user.")
+            except Exception as e:
+                Logger.error(f"Failed to register URL scheme on Linux: {e}")
 
 def get_version_info():
     try:
@@ -304,18 +338,20 @@ class Bootstrapper:
             return False
 
     def run(self) -> None:
+        # Register URL scheme as the very first thing
+        SystemUtils.register_url_scheme(Path(sys.argv[0]))
         self.display_startup_text()
         
         if not self.get_latest_version():
             time.sleep(10)
             sys.exit(1)
-            
+        
         self.setup_directories()
         
         if not self.download_bootstrapper():
             time.sleep(10)
             sys.exit(1)
-            
+        
         self.run_latest_bootstrapper()
         
         if not (self.current_version_dir / "AppSettings.xml").exists():
