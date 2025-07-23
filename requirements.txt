@@ -1,0 +1,4 @@
+tqdm
+pyinstaller
+colorama
+pywin32
